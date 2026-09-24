@@ -1,7 +1,8 @@
 {
   "name": "instagram-url-direct",
-  "version": "2.0.7",
+  "version": "2.1.0",
   "description": "Get direct url to download from Instagram media links",
+  "type": "module",
   "main": "dist/instagram.js",
   "types": "dist/types/instagram.d.ts",
   "files": [
@@ -9,20 +10,20 @@
   ],
   "exports": {
     ".": {
-      "require": "./dist/instagram.cjs",
+      "types": "./dist/types/instagram.d.ts",
       "import": "./dist/instagram.js",
-      "types": "./dist/types/instagram.d.ts"
+      "require": "./dist/instagram.cjs"
     },
     "./package.json": "./package.json"
   },
   "scripts": {
-    "prepublishOnly": "npm run build",
+    "prepare": "npm run build",
     "build": "tsc",
-    "postbuild": "rollup ./dist/instagram.js --format cjs --file ./dist/instagram.cjs"
+    "postbuild": "rollup ./dist/instagram.js --format cjs --exports named --file ./dist/instagram.cjs --external axios,qs"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/victorsouzaleal/instagram-direct-url.git"
+    "url": "git+https://github.com/danojeser/instagram-direct-url-dos.git"
   },
   "keywords": [
     "instagram",
@@ -39,18 +40,21 @@
   "author": "victorsouzaleal <victorsouzaleal@gmail.com>",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/victorsouzaleal/instagram-direct-url/issues"
+    "url": "https://github.com/danojeser/instagram-direct-url-dos/issues"
   },
-  "homepage": "https://github.com/victorsouzaleal/instagram-direct-url#readme",
+  "homepage": "https://github.com/danojeser/instagram-direct-url-dos#readme",
   "dependencies": {
-    "axios": "^1.7.7",
-    "qs": "^6.13.0"
+    "axios": "^1.20.0",
+    "qs": "^6.16.0"
   },
   "devDependencies": {
-    "@types/node": "^22.13.1",
-    "@types/qs": "^6.9.18",
-    "rollup": "^4.34.8",
-    "tsc-alias": "^1.8.10",
-    "typescript": "^5.7.3"
-  }
+    "@types/node": "^22.20.4",
+    "@types/qs": "^6.15.1",
+    "rollup": "^4.63.5",
+    "tsc-alias": "^1.9.5",
+    "typescript": "^5.9.3"
+  },
+  "contributors": [
+    "Daniel Ojeda <danojeser@gmail.com>"
+  ]
 }

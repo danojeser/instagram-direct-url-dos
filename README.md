@@ -18,20 +18,28 @@
 </p>
 
 ## Works with:
-It currently works with general Instagram posts, which can contain multiple images/videos or a single one.
+It currently works with public Instagram posts and reels, which can contain multiple images/videos or a single one.
 
-Stories not supported.
+Stories and private posts are not supported.
+
+Data is obtained from the public embed page of the post, so no login is required. Some fields (`owner_fullname`, `is_private`, `is_ad`) may not be available from that source and will be returned as empty/`false`.
 
 ## Instalation :
 ```bash
-> npm i instagram-url-direct@latest
+> npm i github:danojeser/instagram-direct-url-dos#v2.1.0
 ```
+The package is built automatically on install (`prepare` script).
 
 ## Example
 ```js
 import { instagramGetUrl } from "instagram-url-direct"
+// or: const { instagramGetUrl } = require("instagram-url-direct")
+
 let data = await instagramGetUrl("https://www.instagram.com/tv/CdmYaq3LAYo/")
 console.log(data)
+
+// Optional config: retries on 429/403 responses and initial delay (ms) between them
+data = await instagramGetUrl("https://www.instagram.com/reel/CdmYaq3LAYo/", { retries: 3, delay: 2000 })
 ```
 
 ## Result Example
@@ -45,18 +53,19 @@ console.log(data)
         is_verified: boolean,
         is_private: boolean,
         likes: number,
-        is_ad: boolean
+        is_ad: boolean,
+        caption: string
     },
     url_list: string[],
     media_details: {
         type: 'video' | 'image',
-        dimensions: { 
-            height: string, 
-            width: string
+        dimensions: {
+            height: number,
+            width: number
         },
-        video_view_count: number,
         url: string,
-        thumbnail: string
+        video_view_count?: number, // only videos
+        thumbnail?: string         // only videos
     }[]
 }
 ```

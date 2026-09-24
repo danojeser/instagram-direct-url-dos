@@ -30,25 +30,33 @@ export interface InstagramError {
     error: string
 }
 
+export interface InstagramConfig {
+    retries: number,
+    delay: number
+}
+
 //Main function
-export async function instagramGetUrl (url_media : string, config = { retries: 5, delay: 1000 }){
-    return new Promise <InstagramResponse> (async (resolve,reject)=>{
+export async function instagramGetUrl (url_media : string, config : InstagramConfig = { retries: 5, delay: 1000 }) : Promise<InstagramResponse> {
+    url_media = await checkRedirect(url_media)
+    const SHORTCODE = getShortcode(url_media)
+
+    //The embed page is public and doesn't require login, GraphQL is kept as a fallback
+    try {
+        return await instagramEmbedRequest(SHORTCODE, config.retries, config.delay)
+    } catch(embedErr : any){
         try {
-            url_media = await checkRedirect(url_media)
-            const SHORTCODE = getShortcode(url_media)
             const INSTAGRAM_REQUEST = await instagramRequest(SHORTCODE, config.retries, config.delay)
-            const OUTPUT_DATA = createOutputData(INSTAGRAM_REQUEST)
-            resolve(OUTPUT_DATA as InstagramResponse)
-        } catch(err : any){
-            reject(err)
+            return createOutputData(INSTAGRAM_REQUEST)
+        } catch(graphqlErr : any){
+            throw new Error(`${embedErr.message} | ${graphqlErr.message}`)
         }
-    })
+    }
 }
 
 //Utilities
 async function checkRedirect (url : string){
     let split_url = url.split("/")
-    
+
     if (split_url.includes("share")){
         let res = await axios.get(url)
         return res.request.path
@@ -59,15 +67,15 @@ async function checkRedirect (url : string){
 
 function formatPostInfo(requestData : any){
     try{
-        let mediaCapt = requestData.edge_media_to_caption.edges
+        let mediaCapt = requestData.edge_media_to_caption?.edges ?? []
         const capt = (mediaCapt.length === 0) ? "" : mediaCapt[0].node.text
         return {
             owner_username: requestData.owner.username,
-            owner_fullname: requestData.owner.full_name,
-            is_verified: requestData.owner.is_verified,
-            is_private: requestData.owner.is_private,
-            likes: requestData.edge_media_preview_like.count,
-            is_ad: requestData.is_ad,
+            owner_fullname: requestData.owner.full_name ?? "",
+            is_verified: requestData.owner.is_verified ?? false,
+            is_private: requestData.owner.is_private ?? false,
+            likes: (requestData.edge_media_preview_like ?? requestData.edge_liked_by)?.count ?? 0,
+            is_ad: requestData.is_ad ?? false,
             caption: capt
         }
     } catch(err : any){
@@ -98,15 +106,13 @@ function formatMediaDetails(mediaData : any){
 }
 
 function getShortcode(url : string){
-    try{
-        let split_url = url.split("/")
-        let post_tags = ["p", "reel", "tv", "reels"]
-        let index_shortcode = split_url.findIndex(item => post_tags.includes(item)) + 1
-        let shortcode = split_url[index_shortcode]
-        return shortcode
-    } catch(err : any){
-        throw new Error(`Failed to obtain shortcode: ${err.message}`)
-    }
+    const split_url = url.split(/[?#]/)[0].split("/")
+    const post_tags = ["p", "reel", "tv", "reels"]
+    const index_tag = split_url.findIndex(item => post_tags.includes(item))
+    const shortcode = index_tag === -1 ? undefined : split_url[index_tag + 1]
+
+    if (!shortcode) throw new Error("Failed to obtain shortcode: only posts/reels supported, check if your link is valid.")
+    return shortcode
 }
 
 async function getCSRFToken(){
@@ -138,9 +144,95 @@ async function getCSRFToken(){
 
 function isSidecar(requestData : any){
     try{
-        return requestData["__typename"] == "XDTGraphSidecar"
+        return ["XDTGraphSidecar", "GraphSidecar"].includes(requestData["__typename"])
     } catch(err : any){
         throw new Error(`Failed sidecar verification: ${err.message}`)
+    }
+}
+
+async function withRetries<T>(request: () => Promise<T>, retries: number, delay: number) : Promise<T> {
+    try {
+        return await request()
+    } catch(err : any){
+        const errorCodes = [429, 403]
+
+        if (err.response && errorCodes.includes(err.response.status) && retries > 0) {
+            const retryAfter = err.response.headers['retry-after']
+            const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : delay
+            await new Promise(res => setTimeout(res, waitTime))
+            return withRetries(request, retries - 1, delay * 2)
+        }
+
+        throw err
+    }
+}
+
+async function instagramEmbedRequest(shortcode: string, retries: number, delay: number) {
+    try{
+        const { data : html } = await withRetries(() => axios.get<string>(`https://www.instagram.com/p/${shortcode}/embed/captioned/`, { responseType: 'text' }), retries, delay)
+
+        //Videos, reels and sidecars include the post data as JSON
+        const contextMatch = html.match(/"contextJSON":("(?:[^"\\]|\\.)*")/)
+        if (contextMatch) {
+            const shortcodeMedia = JSON.parse(JSON.parse(contextMatch[1]))?.gql_data?.shortcode_media
+            if (shortcodeMedia) return createOutputData(shortcodeMedia)
+        }
+
+        //Private, removed, age/region restricted or non-embeddable posts
+        if (html.includes('class="EmbedBrokenMedia"')) throw new Error("Post not available without login (it may be private, removed, restricted or have embedding disabled).")
+
+        //Single images only include the post data in the HTML
+        return createOutputDataFromEmbedHtml(html)
+    } catch(err : any){
+        throw new Error(`Failed instagram embed request: ${err.message}`)
+    }
+}
+
+function decodeHtml(text : string){
+    return text
+        .replace(/<br\s*\/?>/g, "\n")
+        .replace(/<[^>]+>/g, "")
+        .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(parseInt(code)))
+        .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
+        .replace(/&quot;/g, '"')
+        .replace(/&#039;|&apos;/g, "'")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&amp;/g, "&")
+}
+
+function createOutputDataFromEmbedHtml(html : string) : InstagramResponse {
+    const mediaType = html.match(/data-media-type="([^"]+)"/)?.[1]
+    const imageTag = html.match(/<img class="EmbeddedMediaImage"[^>]*>/)?.[0]
+    const imageUrl = imageTag?.match(/src="([^"]+)"/)?.[1]
+
+    if (mediaType !== "GraphImage" || !imageUrl) throw new Error("Only posts/reels supported, check if your link is valid.")
+
+    const url = decodeHtml(imageUrl)
+    const srcsetWidths = [...(imageTag?.match(/srcset="([^"]+)"/)?.[1] ?? "").matchAll(/ (\d+)w/g)].map(m => parseInt(m[1]))
+    const width = srcsetWidths.length ? Math.max(...srcsetWidths) : 0
+    const ratio = parseFloat(html.match(/class="Content EmbedFrame" style="padding-bottom: ([\d.]+)%/)?.[1] ?? "0")
+    const likes = parseInt(html.match(/data-log-event="likeCountClick"[^>]*>([\d,.]+) likes?</)?.[1].replace(/[,.]/g, "") ?? "0")
+    const captionHtml = html.match(/<div class="Caption">([\s\S]*?)<div class="Footer">/)?.[1] ?? ""
+    const caption = decodeHtml(captionHtml.replace(/^<a class="CaptionUsername"[^>]*>.*?<\/a>/, "")).trim()
+
+    return {
+        results_number: 1,
+        url_list: [url],
+        post_info: {
+            owner_username: decodeHtml(html.match(/<span class="UsernameText">([^<]*)<\/span>/)?.[1] ?? ""),
+            owner_fullname: "",
+            is_verified: /class="Username"[^>]*>[\s\S]*?<\/span><i class="[^"]*VerifiedSprite/.test(html),
+            is_private: false,
+            likes,
+            is_ad: false,
+            caption
+        },
+        media_details: [{
+            type: "image",
+            dimensions: { height: Math.round(width * ratio / 100), width },
+            url
+        }]
     }
 }
 
@@ -155,42 +247,36 @@ async function instagramRequest(shortcode: string, retries: number, delay: numbe
                 'hoisted_comment_id': null,
                 'hoisted_reply_id': null
             }),
-            'doc_id': INSTAGRAM_DOCUMENT_ID 
+            'doc_id': INSTAGRAM_DOCUMENT_ID
         });
 
-        const token = await getCSRFToken()
+        const data = await withRetries(async () => {
+            const token = await getCSRFToken()
 
-        let config : AxiosRequestConfig = {
-            method: 'post',
-            maxBodyLength: Infinity,
-            url: BASE_URL,
-            headers: {
-                'X-CSRFToken': token,
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            data : dataBody
-        };
-    
-        const { data } = await axios.request(config)
+            let config : AxiosRequestConfig = {
+                method: 'post',
+                maxBodyLength: Infinity,
+                url: BASE_URL,
+                headers: {
+                    'X-CSRFToken': token,
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                data : dataBody
+            };
+
+            return (await axios.request(config)).data
+        }, retries, delay)
+
         if(!data.data?.xdt_shortcode_media) throw new Error("Only posts/reels supported, check if your link is valid.")
         return data.data.xdt_shortcode_media
     } catch(err : any){
-        const errorCodes = [429, 403]
-
-        if (err.response && errorCodes.includes(err.response.status) && retries > 0) {
-            const retryAfter = err.response.headers['retry-after']
-            const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : delay
-            await new Promise(res => setTimeout(res, waitTime))
-            return instagramRequest(shortcode, retries - 1, delay * 2)
-        }
-
         throw new Error(`Failed instagram request: ${err.message}`)
     }
 }
 
-function createOutputData(requestData : any){
+function createOutputData(requestData : any) : InstagramResponse {
     try{
-        let url_list = [], media_details = []
+        let url_list : string[] = [], media_details : InstagramResponse['media_details'] = []
         const IS_SIDECAR = isSidecar(requestData)
         if(IS_SIDECAR){
             //Post with sidecar
@@ -222,6 +308,3 @@ function createOutputData(requestData : any){
         throw new Error(`Failed to create output data: ${err.message}`)
     }
 }
-
-
-
